@@ -1,1 +1,1 @@
-ADMIN_PASSWORD = "tu_contraseña_aqui"  # Cambia esto por tu contraseña deseada
+ADMIN_PASSWORD = "PyMusic_Password"  # Cambia esto por tu contraseña deseada
