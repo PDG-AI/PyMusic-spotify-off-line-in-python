@@ -1,6 +1,9 @@
 PyMusic - Reproductor de Música Local
 ====================================
 
+READ README[idiom].md FOR BETTER INFORMATION
+LEE README[idiom].md PARA MEJOR INFORMACION
+
 A local music player with Spotify-like features, including music download from YouTube and Spotify.
 
 Features
