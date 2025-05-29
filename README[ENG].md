@@ -1,4 +1,4 @@
-$ PyMusic-spotify-off-line-in-python
+# PyMusic-spotify-off-line-in-python
 A local music player with Spotify-like features, including music download from YouTube and Spotify.
 
 Features
