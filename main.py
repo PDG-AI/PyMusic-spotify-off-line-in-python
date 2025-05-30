@@ -5,6 +5,7 @@ import pygame
 import pyperclip
 import yt_dlp
 import time
+import threading
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
 from password import ADMIN_PASSWORD
@@ -18,6 +19,8 @@ class MusicPlayer:
         self.current_playlist = []
         self.current_song_index = 0
         self.played_songs = set()
+        self.check_thread = None
+        self.is_playing = False
         
         # Diccionario de comandos con sus atajos
         self.commands = {
@@ -38,14 +41,18 @@ class MusicPlayer:
             "lists": self.show_lists,
             "l": self.show_lists,
             "songs": self.show_songs,
-            "s": self.show_songs,
+            "sh": self.show_songs,
             "paste": self.paste_url,
             "volume": self.set_volume,
             "v": self.set_volume,
             "pass": self.play_next_song,
             "next": self.play_next_song,
             "p": self.play_next_song,
-            "n": self.play_next_song
+            "n": self.play_next_song,
+            "check": self.check_playlist,
+            "ch": self.check_playlist,
+            "stop": self.stop_playback,
+            "s": self.stop_playback
         }
         
         # Inicializar cliente de Spotify
@@ -110,10 +117,12 @@ Comandos disponibles:
 - Play/P [id_lista] - Reproduce una lista
 - Play_Song/PS [id_cancion] - Reproduce una canción específica
 - Lists/L - Muestra todas las listas de reproducción
-- Songs/S - Muestra todas las canciones disponibles
+- Songs/SH - Muestra todas las canciones disponibles
 - Paste/PA - Pega y procesa automáticamente una URL del portapapeles
 - Volume/V [0-50] - Ajusta el volumen del reproductor (máximo 50%)
 - Pass/NEXT/N - Pasa a la siguiente canción
+- Check/CH [id_lista] - Verifica la integridad de una lista
+- Stop/S - Detiene la reproducción actual
 - Help/H - Muestra esta ayuda
         """)
 
@@ -445,12 +454,34 @@ Comandos disponibles:
             self.current_playlist = playlist["songs"]
             self.played_songs = set()
             print(f"Reproduciendo lista: {playlist['name']}")
+            
+            # Detener el hilo anterior si existe
+            self.is_playing = False
+            if self.check_thread and self.check_thread.is_alive():
+                self.check_thread.join()
+            
+            # Iniciar reproducción
+            self.is_playing = True
             self.play_next_song()
+            
+            # Iniciar el hilo de verificación
+            self.check_thread = threading.Thread(target=self.check_song_end)
+            self.check_thread.daemon = True  # El hilo se cerrará cuando el programa principal termine
+            self.check_thread.start()
+            
         except Exception as e:
             print(f"Error al reproducir playlist: {e}")
 
+    def check_song_end(self):
+        """Verifica si la canción actual ha terminado y reproduce la siguiente"""
+        while self.is_playing:
+            if not pygame.mixer.music.get_busy() and self.current_playlist:
+                self.play_next_song()
+            time.sleep(1)  # Verificar cada segundo
+
     def play_next_song(self):
         if not self.current_playlist:
+            self.is_playing = False
             return
 
         available_songs = [s for s in self.current_playlist if s not in self.played_songs]
@@ -468,13 +499,27 @@ Comandos disponibles:
             print(f"Reproduciendo: {title}")
         except Exception as e:
             print(f"Error al reproducir canción: {e}")
+            self.is_playing = False
 
     def play_song(self, song_id):
         try:
+            # Detener el hilo anterior si existe
+            self.is_playing = False
+            if self.check_thread and self.check_thread.is_alive():
+                self.check_thread.join()
+            
+            # Iniciar reproducción
+            self.is_playing = True
             pygame.mixer.music.load(f"Songs/{song_id}.mp3")
             pygame.mixer.music.play()
             title = self.get_song_title(song_id)
             print(f"Reproduciendo: {title}")
+            
+            # Iniciar el hilo de verificación
+            self.check_thread = threading.Thread(target=self.check_song_end)
+            self.check_thread.daemon = True
+            self.check_thread.start()
+            
         except Exception as e:
             print(f"Error al reproducir canción: {e}")
 
@@ -492,6 +537,69 @@ Comandos disponibles:
                 print("El volumen debe estar entre 0 y 50")
         except ValueError:
             print("Por favor, introduce un número entre 0 y 50")
+
+    def check_playlist(self, playlist_id):
+        """Verifica que todas las canciones de una lista existan"""
+        try:
+            # Verificar que la lista existe
+            if not playlist_id.endswith('L'):
+                playlist_id = f"{playlist_id}L"
+            
+            playlist_path = f"Lists/{playlist_id}.json"
+            if not os.path.exists(playlist_path):
+                print(f"Error: La lista {playlist_id} no existe")
+                return False
+
+            # Cargar la lista
+            with open(playlist_path, "r") as f:
+                playlist = json.load(f)
+            
+            print(f"\nVerificando lista: {playlist['name']}")
+            print(f"Total de canciones: {len(playlist['songs'])}")
+            
+            # Verificar cada canción
+            missing_songs = []
+            for song_id in playlist['songs']:
+                song_path = f"Songs/{song_id}.mp3"
+                if not os.path.exists(song_path):
+                    missing_songs.append(song_id)
+                    print(f"❌ Canción no encontrada: {self.get_song_title(song_id)} (ID: {song_id})")
+                else:
+                    print(f"✓ Canción encontrada: {self.get_song_title(song_id)} (ID: {song_id})")
+            
+            # Mostrar resumen
+            if missing_songs:
+                print(f"\n⚠️  Se encontraron {len(missing_songs)} canciones faltantes:")
+                for song_id in missing_songs:
+                    print(f"- {self.get_song_title(song_id)} (ID: {song_id})")
+                
+                # Preguntar si quiere eliminar las canciones faltantes
+                response = input("\n¿Deseas eliminar las canciones faltantes de la lista? (s/n): ")
+                if response.lower() == 's':
+                    playlist['songs'] = [s for s in playlist['songs'] if s not in missing_songs]
+                    with open(playlist_path, "w") as f:
+                        json.dump(playlist, f, indent=2)
+                    print(f"✅ Lista actualizada. Canciones restantes: {len(playlist['songs'])}")
+            else:
+                print("\n✅ Todas las canciones están presentes en la lista")
+            
+            return True
+        except Exception as e:
+            print(f"Error al verificar la lista: {e}")
+            return False
+
+    def stop_playback(self):
+        """Detiene la reproducción actual"""
+        try:
+            self.is_playing = False
+            if self.check_thread and self.check_thread.is_alive():
+                self.check_thread.join()
+            pygame.mixer.music.stop()
+            self.current_playlist = []
+            self.played_songs.clear()
+            print("Reproducción detenida")
+        except Exception as e:
+            print(f"Error al detener la reproducción: {e}")
 
 if __name__ == "__main__":
     player = MusicPlayer()
