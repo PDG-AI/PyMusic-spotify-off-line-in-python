@@ -11,6 +11,9 @@ from spotipy.oauth2 import SpotifyClientCredentials
 from password import ADMIN_PASSWORD
 from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, DEFAULT_VOLUME
 
+# Obtener la ruta base del proyecto
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 class MusicPlayer:
     def __init__(self):
         pygame.mixer.init()
@@ -21,6 +24,18 @@ class MusicPlayer:
         self.played_songs = set()
         self.check_thread = None
         self.is_playing = False
+        self.downloading = False
+        self.cancel_download = False
+        
+        # Crear directorios necesarios
+        self.songs_dir = os.path.join(BASE_DIR, "Songs")
+        self.lists_dir = os.path.join(BASE_DIR, "Lists")
+        os.makedirs(self.songs_dir, exist_ok=True)
+        os.makedirs(self.lists_dir, exist_ok=True)
+        
+        # Cargar o crear el contador de IDs
+        self.song_counter_file = os.path.join(self.songs_dir, "counter.json")
+        self.song_counter = self.load_song_counter()
         
         # Diccionario de comandos con sus atajos
         self.commands = {
@@ -29,7 +44,7 @@ class MusicPlayer:
             "download_spotify": self.download_spotify_playlist,
             "ds": self.download_spotify_playlist,
             "create": self.create_playlist,
-            "c": self.create_playlist,
+            "cl": self.create_playlist,
             "delete": self.delete_playlist,
             "del": self.delete_playlist,
             "play": self.play_playlist,
@@ -52,7 +67,13 @@ class MusicPlayer:
             "check": self.check_playlist,
             "ch": self.check_playlist,
             "stop": self.stop_playback,
-            "s": self.stop_playback
+            "s": self.stop_playback,
+            "cancel": self.cancel_current_download,
+            "c": self.cancel_current_download,
+            "edit": self.edit_playlist,
+            "e": self.edit_playlist,
+            "showlist": self.show_list_content,
+            "sl": self.show_list_content
         }
         
         # Inicializar cliente de Spotify
@@ -112,30 +133,37 @@ class MusicPlayer:
 Comandos disponibles:
 - Download/D [url_youtube] - Descarga un video de YouTube como MP3
 - Download_Spotify/DS [url_playlist] - Descarga una playlist de Spotify
-- Create/C [nombre_lista] [id_cancion1] [id_cancion2] ... - Crea una nueva lista
+- Create/CL [nombre_lista] [id1] [id2] ... - Crea una nueva lista
+  Ejemplo: Create MiLista 1 2 3 4 5
+- Edit/E [id_lista] add/remove [id1] [id2] ... - Edita una lista existente
+  Ejemplos: 
+  - Edit 1L add 6 7 8
+  - Edit 1L remove 3 4
 - Delete/DEL [id_lista_o_cancion] [contraseña] - Elimina una lista o canción
 - Play/P [id_lista] - Reproduce una lista
 - Play_Song/PS [id_cancion] - Reproduce una canción específica
 - Lists/L - Muestra todas las listas de reproducción
 - Songs/SH - Muestra todas las canciones disponibles
+- ShowList/SL [id_lista] - Muestra el contenido detallado de una lista
 - Paste/PA - Pega y procesa automáticamente una URL del portapapeles
 - Volume/V [0-50] - Ajusta el volumen del reproductor (máximo 50%)
 - Pass/NEXT/N - Pasa a la siguiente canción
 - Check/CH [id_lista] - Verifica la integridad de una lista
 - Stop/S - Detiene la reproducción actual
+- Cancel/C - Cancela la descarga actual
 - Help/H - Muestra esta ayuda
         """)
 
     def show_lists(self):
         try:
-            lists = os.listdir("Lists")
+            lists = os.listdir(self.lists_dir)
             if not lists:
                 print("No hay listas de reproducción disponibles")
                 return
             
             print("\nListas de reproducción disponibles:")
             for i, list_file in enumerate(lists, 1):
-                with open(f"Lists/{list_file}", "r") as f:
+                with open(os.path.join(self.lists_dir, list_file), "r") as f:
                     playlist = json.load(f)
                     print(f"{i}. {list_file[:-5]}: {playlist['name']} ({len(playlist['songs'])} canciones)")
         except Exception as e:
@@ -143,20 +171,38 @@ Comandos disponibles:
 
     def show_songs(self):
         try:
-            songs = os.listdir("Songs")
+            songs = os.listdir(self.songs_dir)
             if not songs:
                 print("No hay canciones disponibles")
                 return
+            
+            # Cargar metadatos
+            metadata_file = os.path.join(self.songs_dir, 'metadata.json')
+            metadata = {}
+            if os.path.exists(metadata_file):
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
             
             print("\nCanciones disponibles:")
             for i, song in enumerate(songs, 1):
                 if song.endswith(".mp3"):
                     song_id = song[:-4]  # Quitar la extensión .mp3
-                    title = self.get_song_title(song_id)
-                    print(f"{i}. {title} (ID: {song_id})")
+                    if song_id in metadata:
+                        song_info = metadata[song_id]
+                        title = song_info.get("title", f"Canción {song_id}")
+                        added_date = song_info.get("added_date", "Fecha desconocida")
+                        print(f"{i}. {title} (ID: {song_id}) - Añadida: {added_date}")
+                    else:
+                        print(f"{i}. Canción {song_id} (ID: {song_id})")
         except Exception as e:
             print(f"Error al mostrar canciones: {e}")
-        
+            # Mostrar las canciones sin metadatos en caso de error
+            print("\nCanciones disponibles (sin metadatos):")
+            for i, song in enumerate(songs, 1):
+                if song.endswith(".mp3"):
+                    song_id = song[:-4]
+                    print(f"{i}. Canción {song_id} (ID: {song_id})")
+
     def download_spotify_track(self, track_url):
         """Descarga una canción individual de Spotify"""
         if not self.spotify:
@@ -184,7 +230,7 @@ Comandos disponibles:
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
-                'outtmpl': os.path.join('Songs', '%(id)s.%(ext)s'),
+                'outtmpl': os.path.join(self.songs_dir, '%(id)s.%(ext)s'),
                 'quiet': True,
                 'no_warnings': True,
                 'default_search': 'ytsearch',
@@ -237,6 +283,9 @@ Comandos disponibles:
             return
         
         try:
+            self.downloading = True
+            self.cancel_download = False
+            
             # Extraer el ID de la playlist de la URL
             playlist_id = playlist_url.split("/playlist/")[1].split("?")[0]
             
@@ -258,14 +307,25 @@ Comandos disponibles:
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
-                'outtmpl': os.path.join('Songs', '%(id)s.%(ext)s'),
+                'outtmpl': os.path.join(self.songs_dir, '%(id)s.%(ext)s'),
                 'quiet': True,
                 'no_warnings': True,
                 'default_search': 'ytsearch',
                 'extract_flat': True,
+                'progress_hooks': [self.download_progress_hook],
             }
             
             for i, track in enumerate(tracks, 1):
+                if self.cancel_download:
+                    print("\nDescarga cancelada")
+                    # Eliminar archivos parciales
+                    for song_id in downloaded_songs:
+                        try:
+                            os.remove(os.path.join(self.songs_dir, f"{song_id}.mp3"))
+                        except:
+                            pass
+                    return None
+                    
                 try:
                     song_name = track['track']['name']
                     artist = track['track']['artists'][0]['name']
@@ -295,10 +355,26 @@ Comandos disponibles:
                                     video = valid_videos[0]
                                     print(f"\nEncontrado: {video['title']}")
                                     ydl.download([f"https://www.youtube.com/watch?v={video['id']}"])
-                                    # Guardar el título en un archivo de metadatos
-                                    self.save_song_metadata(video['id'], video['title'])
-                                    downloaded_songs.append(video['id'])
-                                    print(f"✓ Descargada: {song_name}")
+                                    if self.cancel_download:
+                                        print("\nDescarga cancelada")
+                                        # Eliminar archivo parcial
+                                        try:
+                                            os.remove(os.path.join(self.songs_dir, f"{video['id']}.mp3"))
+                                        except:
+                                            pass
+                                        return None
+                                    
+                                    # Obtener nuevo ID y renombrar el archivo
+                                    new_id = self.get_next_song_id()
+                                    old_path = os.path.join(self.songs_dir, f"{video['id']}.mp3")
+                                    new_path = os.path.join(self.songs_dir, f"{new_id}.mp3")
+                                    os.rename(old_path, new_path)
+                                    
+                                    # Guardar metadatos con el título de Spotify
+                                    title = f"{song_name} - {artist}"
+                                    self.save_song_metadata(new_id, title)
+                                    downloaded_songs.append(new_id)
+                                    print(f"✓ Descargada: {title}")
                                     time.sleep(1)
                                 else:
                                     print(f"\nNo se encontró una versión adecuada para: {song_name}")
@@ -321,11 +397,14 @@ Comandos disponibles:
         except Exception as e:
             print(f"Error al descargar playlist de Spotify: {e}")
             return None
+        finally:
+            self.downloading = False
+            self.cancel_download = False
 
     def save_song_metadata(self, song_id, title):
         """Guarda los metadatos de la canción en un archivo JSON"""
         try:
-            metadata_file = os.path.join('Songs', 'metadata.json')
+            metadata_file = os.path.join(self.songs_dir, 'metadata.json')
             metadata = {}
             
             # Cargar metadatos existentes si el archivo existe
@@ -333,8 +412,18 @@ Comandos disponibles:
                 with open(metadata_file, 'r', encoding='utf-8') as f:
                     metadata = json.load(f)
             
+            # Limpiar el título (eliminar caracteres especiales y extensiones)
+            clean_title = title
+            if clean_title.endswith('.mp3'):
+                clean_title = clean_title[:-4]
+            if clean_title.endswith('.webm'):
+                clean_title = clean_title[:-5]
+            
             # Actualizar metadatos
-            metadata[song_id] = title
+            metadata[song_id] = {
+                "title": clean_title,
+                "added_date": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
             
             # Guardar metadatos
             with open(metadata_file, 'w', encoding='utf-8') as f:
@@ -345,17 +434,21 @@ Comandos disponibles:
     def get_song_title(self, song_id):
         """Obtiene el título de una canción desde los metadatos"""
         try:
-            metadata_file = os.path.join('Songs', 'metadata.json')
+            metadata_file = os.path.join(self.songs_dir, 'metadata.json')
             if os.path.exists(metadata_file):
                 with open(metadata_file, 'r', encoding='utf-8') as f:
                     metadata = json.load(f)
-                    return metadata.get(song_id, f"Canción {song_id}")
+                    if song_id in metadata:
+                        return metadata[song_id].get("title", f"Canción {song_id}")
             return f"Canción {song_id}"
         except:
             return f"Canción {song_id}"
 
     def download_youtube_video(self, video_url):
         try:
+            self.downloading = True
+            self.cancel_download = False
+            
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'postprocessors': [{
@@ -363,28 +456,66 @@ Comandos disponibles:
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
-                'outtmpl': os.path.join('Songs', '%(id)s.%(ext)s'),
+                'outtmpl': os.path.join(self.songs_dir, '%(id)s.%(ext)s'),
                 'quiet': True,
                 'no_warnings': True,
+                'progress_hooks': [self.download_progress_hook],
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
-                video_id = info['id']
-                print(f"Canción descargada con ID: {video_id}")
-                time.sleep(1)  # Pausa de 1 segundo
-                return video_id
+                if self.cancel_download:
+                    print("Descarga cancelada")
+                    # Eliminar archivo parcial si existe
+                    try:
+                        os.remove(os.path.join(self.songs_dir, f"{info['id']}.mp3"))
+                    except:
+                        pass
+                    return None
+                
+                # Obtener nuevo ID y renombrar el archivo
+                new_id = self.get_next_song_id()
+                old_path = os.path.join(self.songs_dir, f"{info['id']}.mp3")
+                new_path = os.path.join(self.songs_dir, f"{new_id}.mp3")
+                os.rename(old_path, new_path)
+                
+                # Guardar metadatos con el título del video
+                title = info.get('title', f'Video {info["id"]}')
+                self.save_song_metadata(new_id, title)
+                print(f"Canción descargada con ID: {new_id}")
+                print(f"Título: {title}")
+                time.sleep(1)
+                return new_id
         except Exception as e:
             print(f"Error al descargar video: {e}")
             return None
+        finally:
+            self.downloading = False
+            self.cancel_download = False
+
+    def download_progress_hook(self, d):
+        """Hook para mostrar el progreso de la descarga"""
+        if d['status'] == 'downloading':
+            if 'total_bytes' in d:
+                total = d['total_bytes']
+                downloaded = d['downloaded_bytes']
+                percentage = (downloaded / total) * 100
+                print(f"\rDescargando: {percentage:.1f}%", end='', flush=True)
+            elif 'total_bytes_estimate' in d:
+                total = d['total_bytes_estimate']
+                downloaded = d['downloaded_bytes']
+                percentage = (downloaded / total) * 100
+                print(f"\rDescargando: {percentage:.1f}%", end='', flush=True)
+        elif d['status'] == 'finished':
+            print("\nDescarga completada, procesando...")
 
     def create_playlist(self, playlist_name, *songs):
-        playlist_id = f"{len(os.listdir('Lists')) + 1}L"
+        playlist_id = f"{len(os.listdir(self.lists_dir)) + 1}L"
         playlist_data = {
             "name": playlist_name,
             "songs": list(songs)
         }
-        with open(f"Lists/{playlist_id}.json", "w") as f:
+        with open(os.path.join(self.lists_dir, f"{playlist_id}.json"), "w") as f:
             json.dump(playlist_data, f)
         print(f"Lista creada con ID: {playlist_id}")
         return playlist_id
@@ -396,11 +527,11 @@ Comandos disponibles:
         try:
             # Verificar si es una lista o una canción
             if item_id.endswith('L'):  # Es una lista
-                os.remove(f"Lists/{item_id}.json")
+                os.remove(os.path.join(self.lists_dir, f"{item_id}.json"))
                 print(f"Lista {item_id} eliminada")
             else:  # Es una canción
                 # Eliminar el archivo MP3
-                mp3_path = f"Songs/{item_id}.mp3"
+                mp3_path = os.path.join(self.songs_dir, f"{item_id}.mp3")
                 if os.path.exists(mp3_path):
                     os.remove(mp3_path)
                     # Eliminar de los metadatos
@@ -418,7 +549,7 @@ Comandos disponibles:
     def remove_song_metadata(self, song_id):
         """Elimina una canción de los metadatos"""
         try:
-            metadata_file = os.path.join('Songs', 'metadata.json')
+            metadata_file = os.path.join(self.songs_dir, 'metadata.json')
             if os.path.exists(metadata_file):
                 with open(metadata_file, 'r', encoding='utf-8') as f:
                     metadata = json.load(f)
@@ -434,8 +565,8 @@ Comandos disponibles:
     def remove_song_from_playlists(self, song_id):
         """Elimina una canción de todas las listas de reproducción"""
         try:
-            for playlist_file in os.listdir("Lists"):
-                playlist_path = f"Lists/{playlist_file}"
+            for playlist_file in os.listdir(self.lists_dir):
+                playlist_path = os.path.join(self.lists_dir, playlist_file)
                 with open(playlist_path, "r") as f:
                     playlist = json.load(f)
                 
@@ -448,7 +579,7 @@ Comandos disponibles:
 
     def play_playlist(self, playlist_id):
         try:
-            with open(f"Lists/{playlist_id}.json", "r") as f:
+            with open(os.path.join(self.lists_dir, f"{playlist_id}.json"), "r") as f:
                 playlist = json.load(f)
             
             self.current_playlist = playlist["songs"]
@@ -493,7 +624,7 @@ Comandos disponibles:
         self.played_songs.add(next_song)
         
         try:
-            pygame.mixer.music.load(f"Songs/{next_song}.mp3")
+            pygame.mixer.music.load(os.path.join(self.songs_dir, f"{next_song}.mp3"))
             pygame.mixer.music.play()
             title = self.get_song_title(next_song)
             print(f"Reproduciendo: {title}")
@@ -510,7 +641,7 @@ Comandos disponibles:
             
             # Iniciar reproducción
             self.is_playing = True
-            pygame.mixer.music.load(f"Songs/{song_id}.mp3")
+            pygame.mixer.music.load(os.path.join(self.songs_dir, f"{song_id}.mp3"))
             pygame.mixer.music.play()
             title = self.get_song_title(song_id)
             print(f"Reproduciendo: {title}")
@@ -545,7 +676,7 @@ Comandos disponibles:
             if not playlist_id.endswith('L'):
                 playlist_id = f"{playlist_id}L"
             
-            playlist_path = f"Lists/{playlist_id}.json"
+            playlist_path = os.path.join(self.lists_dir, f"{playlist_id}.json")
             if not os.path.exists(playlist_path):
                 print(f"Error: La lista {playlist_id} no existe")
                 return False
@@ -560,7 +691,7 @@ Comandos disponibles:
             # Verificar cada canción
             missing_songs = []
             for song_id in playlist['songs']:
-                song_path = f"Songs/{song_id}.mp3"
+                song_path = os.path.join(self.songs_dir, f"{song_id}.mp3")
                 if not os.path.exists(song_path):
                     missing_songs.append(song_id)
                     print(f"❌ Canción no encontrada: {self.get_song_title(song_id)} (ID: {song_id})")
@@ -601,6 +732,149 @@ Comandos disponibles:
         except Exception as e:
             print(f"Error al detener la reproducción: {e}")
 
+    def cancel_current_download(self):
+        """Cancela la descarga actual"""
+        if self.downloading:
+            self.cancel_download = True
+            print("Cancelando descarga...")
+        else:
+            print("No hay ninguna descarga en progreso")
+
+    def load_song_counter(self):
+        """Carga o crea el contador de IDs de canciones"""
+        try:
+            if os.path.exists(self.song_counter_file):
+                with open(self.song_counter_file, 'r') as f:
+                    return json.load(f)
+            else:
+                # Crear el directorio Songs si no existe
+                os.makedirs(self.songs_dir, exist_ok=True)
+                # Inicializar el contador
+                counter = {"next_id": 1}
+                with open(self.song_counter_file, 'w') as f:
+                    json.dump(counter, f)
+                return counter
+        except Exception as e:
+            print(f"Error al cargar el contador: {e}")
+            return {"next_id": 1}
+
+    def save_song_counter(self):
+        """Guarda el contador de IDs de canciones"""
+        try:
+            with open(self.song_counter_file, 'w') as f:
+                json.dump(self.song_counter, f)
+        except Exception as e:
+            print(f"Error al guardar el contador: {e}")
+
+    def get_next_song_id(self):
+        """Obtiene el siguiente ID de canción disponible"""
+        song_id = str(self.song_counter["next_id"])
+        self.song_counter["next_id"] += 1
+        self.save_song_counter()
+        return song_id
+
+    def edit_playlist(self, playlist_id, action, *song_ids):
+        """Edita una lista de reproducción existente"""
+        try:
+            # Verificar que la lista existe
+            if not playlist_id.endswith('L'):
+                playlist_id = f"{playlist_id}L"
+            
+            playlist_path = os.path.join(self.lists_dir, f"{playlist_id}.json")
+            if not os.path.exists(playlist_path):
+                print(f"Error: La lista {playlist_id} no existe")
+                return False
+
+            # Cargar la lista
+            with open(playlist_path, "r") as f:
+                playlist = json.load(f)
+            
+            # Verificar la acción
+            action = action.lower()
+            if action not in ['add', 'remove']:
+                print("Error: La acción debe ser 'add' o 'remove'")
+                return False
+
+            # Verificar que las canciones existen
+            valid_songs = []
+            for song_id in song_ids:
+                song_path = os.path.join(self.songs_dir, f"{song_id}.mp3")
+                if not os.path.exists(song_path):
+                    print(f"Advertencia: La canción {song_id} no existe")
+                else:
+                    valid_songs.append(song_id)
+
+            # Realizar la acción
+            if action == 'add':
+                # Añadir canciones (evitando duplicados)
+                for song_id in valid_songs:
+                    if song_id not in playlist['songs']:
+                        playlist['songs'].append(song_id)
+                print(f"✓ Añadidas {len(valid_songs)} canciones a la lista")
+            else:  # remove
+                # Eliminar canciones
+                original_count = len(playlist['songs'])
+                playlist['songs'] = [s for s in playlist['songs'] if s not in valid_songs]
+                removed_count = original_count - len(playlist['songs'])
+                print(f"✓ Eliminadas {removed_count} canciones de la lista")
+
+            # Guardar la lista actualizada
+            with open(playlist_path, "w") as f:
+                json.dump(playlist, f, indent=2)
+            
+            # Mostrar resumen
+            print(f"\nLista actualizada: {playlist['name']}")
+            print(f"Total de canciones: {len(playlist['songs'])}")
+            return True
+
+        except Exception as e:
+            print(f"Error al editar la lista: {e}")
+            return False
+
+    def show_list_content(self, playlist_id):
+        """Muestra el contenido detallado de una lista de reproducción"""
+        try:
+            # Verificar que la lista existe
+            if not playlist_id.endswith('L'):
+                playlist_id = f"{playlist_id}L"
+            
+            playlist_path = os.path.join(self.lists_dir, f"{playlist_id}.json")
+            if not os.path.exists(playlist_path):
+                print(f"Error: La lista {playlist_id} no existe")
+                return False
+
+            # Cargar la lista
+            with open(playlist_path, "r") as f:
+                playlist = json.load(f)
+            
+            # Cargar metadatos
+            metadata_file = os.path.join(self.songs_dir, 'metadata.json')
+            metadata = {}
+            if os.path.exists(metadata_file):
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+            
+            print(f"\nLista: {playlist['name']}")
+            print(f"ID: {playlist_id}")
+            print(f"Total de canciones: {len(playlist['songs'])}")
+            print("\nCanciones:")
+            
+            for i, song_id in enumerate(playlist['songs'], 1):
+                if song_id in metadata:
+                    song_info = metadata[song_id]
+                    title = song_info.get("title", f"Canción {song_id}")
+                    added_date = song_info.get("added_date", "Fecha desconocida")
+                    print(f"{i}. {title}")
+                    print(f"   ID: {song_id} - Añadida: {added_date}")
+                else:
+                    print(f"{i}. Canción {song_id}")
+                    print(f"   ID: {song_id}")
+            
+            return True
+        except Exception as e:
+            print(f"Error al mostrar la lista: {e}")
+            return False
+
 if __name__ == "__main__":
     player = MusicPlayer()
     print("PyMusic - Reproductor de Música Local")
@@ -609,7 +883,7 @@ if __name__ == "__main__":
     
     while True:
         try:
-            command = input("\nComando > ")
+            command = input("\nCommand > ")
             if command.lower() == "exit":
                 break
             player.process_command(command)
